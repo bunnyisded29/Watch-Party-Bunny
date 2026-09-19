@@ -1,0 +1,1 @@
+module.exports=(req,res)=>{const{PUSHER_KEY:key,PUSHER_CLUSTER:cluster}=process.env;if(!key||!cluster)return res.status(500).json({error:"Missing Pusher settings"});res.json({key,cluster})};

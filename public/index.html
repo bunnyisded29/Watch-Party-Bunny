@@ -1,0 +1,102 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Together — Watch Party</title>
+<script src="https://js.pusher.com/8.4.0/pusher.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#090b0f;color:#f5f1e8;font-family:system-ui,-apple-system,sans-serif}button,input{font:inherit}button{cursor:pointer}.landing{min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(520px,100%);background:#121720;border:1px solid #ffffff18;border-radius:20px;padding:28px;box-shadow:0 20px 80px #0008}h1{font:48px Georgia;margin:0 0 10px}.a{color:#e9a33d;font-style:italic}.sub{color:#9ca3af;line-height:1.5}.field{margin:12px 0}.field input{width:100%;padding:13px;background:#090b0f;color:white;border:1px solid #ffffff18;border-radius:10px}.btn{padding:12px 15px;border-radius:10px;border:1px solid #ffffff18;background:#ffffff08;color:white}.btn:hover{background:#ffffff14}.primary{background:#e9a33d;color:#171006;border:0;font-weight:700}.row{display:flex;gap:10px}.row>*{flex:1}.divider{margin:20px 0;text-align:center;color:#69717e}.app{display:none;position:fixed;inset:0;background:#000}.video{width:100%;height:100%;object-fit:contain;background:#000}.screenVideo{display:none}.top,.bottom{position:absolute;left:0;right:0;z-index:3;padding:16px;background:linear-gradient(#000d,transparent)}.top{top:0;display:flex;justify-content:space-between;align-items:center;gap:10px}.bottom{bottom:0;background:linear-gradient(transparent,#000e)}.range{width:100%;accent-color:#e9a33d}.controls{display:flex;gap:10px;align-items:center}.grow{flex:1}.source{position:absolute;inset:0;z-index:5;display:grid;place-items:center;background:#090b0f;padding:20px}.source .card{text-align:center}.muted{color:#9ca3af;font-size:13px}.status{margin:14px 0;padding:10px;border-radius:10px;background:#ffffff08;color:#cbd5e1;font-size:13px}.hidden{display:none!important}.pill{font-size:12px;padding:6px 9px;border-radius:999px;background:#ffffff10;color:#ddd}.danger{color:#ffb4b4}.libraryList{max-height:300px;overflow:auto;text-align:left;margin:15px 0}.movie{width:100%;margin:5px 0;text-align:left}.notice{margin-top:12px;font-size:12px;color:#8e98a8;line-height:1.45}
+</style></head><body>
+<div class="landing" id="landing"><div class="card"><h1>Watch it<br><span class="a">together</span>, apart.</h1><p class="sub">Private synchronized rooms using the movie library on your own PC, plus browser screen sharing.</p><div class="field"><input id="name" placeholder="Your name"></div><button class="btn primary" id="create" style="width:100%">Create private room</button><div class="divider">or join</div><div class="field"><input id="code" placeholder="Room code"></div><button class="btn" id="join" style="width:100%">Join room</button><p class="muted">Pusher handles room signaling. Your PC remains the movie storage.</p></div></div>
+<div class="app" id="app">
+<video class="video" id="video" playsinline preload="metadata"></video>
+<video class="video screenVideo" id="remoteScreen" autoplay playsinline></video>
+<div class="source" id="source"><div class="card"><h2>Choose what to watch</h2><p class="muted">Use your PC library or share your screen with the other person.</p><div class="row"><button class="btn primary" id="library">PC Library</button><button class="btn" id="screenStart">Share Screen</button></div><div id="libraryPanel" class="libraryList hidden"></div><div id="msg" class="status">Waiting for a source…</div><div class="notice">Screen sharing requires a secure HTTPS page and browser permission. The person sharing stays in control of their screen.</div></div></div>
+<div class="top"><span>● <b id="room"></b> · <span id="peer">waiting</span> <span class="pill" id="mode">Movie</span></span><div class="row"><button class="btn" id="stopScreen" style="display:none">Stop sharing</button><button class="btn" id="share">Invite</button></div></div>
+<div class="bottom"><input class="range" id="seek" type="range" min="0" max="1000" value="0"><div class="controls"><button class="btn" id="play">▶</button><span id="time">0:00 / 0:00</span><span class="grow"></span><button class="btn" id="full">⛶</button></div></div>
+</div>
+<script>
+(()=>{
+let pusher,ch,room,name,id=Math.random().toString(36).slice(2,9),remote=false;
+let screenPc=null,screenStream=null,isScreenSender=false,remoteScreenStream=null;
+const $=x=>document.getElementById(x),v=$("video"),rv=$("remoteScreen");
+const MEDIA_SERVER=localStorage.getItem("MEDIA_SERVER")||"";
+const ICE_SERVERS=[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}];
+const send=(t,p)=>ch&&ch.trigger("client-sync",{t,p,from:id});
+const tm=s=>{s=isFinite(s)?s:0;return Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0")};
+function status(x){$("msg").textContent=x}
+function setMode(x){$("mode").textContent=x}
+function showMovie(){rv.style.display="none";v.style.display="block";setMode("Movie");$("seek").style.display="block";$("play").style.display="inline-block"}
+function showScreen(){v.style.display="none";rv.style.display="block";setMode("Screen share");$("seek").style.display="none";$("play").style.display="none"}
+function sendScreen(t,p){if(ch)ch.trigger(t,{from:id,...p})}
+async function makeSenderOffer(){
+ if(!screenPc||!screenStream)return;
+ const offer=await screenPc.createOffer();await screenPc.setLocalDescription(offer);
+ sendScreen("client-screen-offer",{sdp:screenPc.localDescription});
+}
+function setupScreenPc(sender){
+ if(screenPc)screenPc.close();
+ screenPc=new RTCPeerConnection({iceServers:ICE_SERVERS});
+ screenPc.onicecandidate=e=>{if(e.candidate)sendScreen("client-screen-ice",{candidate:e.candidate});};
+ screenPc.onconnectionstatechange=()=>{if(["failed","disconnected","closed"].includes(screenPc.connectionState)&&!sender)status("Screen connection ended. Waiting for another source…")};
+ if(sender){screenStream.getTracks().forEach(t=>screenPc.addTrack(t,screenStream));}
+ else{remoteScreenStream=new MediaStream();rv.srcObject=remoteScreenStream;screenPc.ontrack=e=>{e.streams[0]?.getTracks().forEach(t=>remoteScreenStream.addTrack(t));showScreen();$("source").style.display="none";status("Receiving screen share")};}
+}
+async function startScreenShare(broadcast=true){
+ if(!navigator.mediaDevices?.getDisplayMedia)return alert("This browser does not support screen sharing.");
+ try{
+  screenStream=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:30},audio:true});
+  isScreenSender=true;setupScreenPc(true);showScreen();$("source").style.display="none";$('stopScreen').style.display="inline-block";status("You are sharing your screen");
+  screenStream.getVideoTracks()[0].addEventListener("ended",stopScreenShare);
+  if(broadcast)sendScreen("client-screen-start",{active:true});
+  await makeSenderOffer();
+ }catch(e){status("Screen share was cancelled or blocked.");console.error(e)}
+}
+async function requestScreen(){sendScreen("client-screen-request",{want:true});}
+async function stopScreenShare(){
+ if(screenStream)screenStream.getTracks().forEach(t=>t.stop());screenStream=null;isScreenSender=false;
+ if(screenPc){screenPc.close();screenPc=null}rv.srcObject=null;$('stopScreen').style.display="none";showMovie();$("source").style.display="grid";status("Screen sharing stopped");sendScreen("client-screen-stop",{});
+}
+async function handleScreenOffer(d){
+ if(d.from===id)return;
+ if(isScreenSender)return;
+ setupScreenPc(false);
+ await screenPc.setRemoteDescription(d.sdp);
+ const answer=await screenPc.createAnswer();await screenPc.setLocalDescription(answer);
+ sendScreen("client-screen-answer",{sdp:screenPc.localDescription});
+}
+async function handleScreenAnswer(d){if(!screenPc||!isScreenSender||d.from===id)return;await screenPc.setRemoteDescription(d.sdp)}
+async function handleScreenIce(d){if(!screenPc||d.from===id)return;try{await screenPc.addIceCandidate(d.candidate)}catch(e){console.warn(e)}}
+async function enter(){
+ $("landing").style.display="none";$("app").style.display="block";$("room").textContent=room;
+ try{
+  let c=await(await fetch("/api/config")).json();
+  pusher=new Pusher(c.key,{cluster:c.cluster,authEndpoint:"/api/pusher-auth",auth:{params:{user_id:id,user_info:JSON.stringify({name})}}});
+  ch=pusher.subscribe("presence-room-"+room);
+  ch.bind("pusher:subscription_succeeded",m=>{$("peer").textContent=m.count>1?"both here":"waiting";if(m.count>1)requestScreen()});
+  ch.bind("pusher:member_added",()=>{$("peer").textContent="both here";if(isScreenSender)setTimeout(makeSenderOffer,300)});
+  ch.bind("pusher:member_removed",()=>{$("peer").textContent="waiting"});
+  ch.bind("client-sync",async d=>{if(!d||d.from===id)return;remote=true;try{if(d.t==="url"){v.src=d.p.url;$("source").style.display="none";showMovie()}else if(d.t==="play"){v.currentTime=d.p.t;await v.play().catch(()=>{})}else if(d.t==="pause"){v.pause();v.currentTime=d.p.t}else if(d.t==="seek")v.currentTime=d.p.t;else if(d.t==="beat"&&!v.paused&&Math.abs(v.currentTime-d.p.t)>.8)v.currentTime=d.p.t}finally{remote=false}});
+  ch.bind("client-screen-start",d=>{if(d.from!==id){requestScreen()}});
+  ch.bind("client-screen-request",async d=>{if(d.from!==id&&isScreenSender)setTimeout(makeSenderOffer,100)});
+  ch.bind("client-screen-offer",handleScreenOffer);
+  ch.bind("client-screen-answer",handleScreenAnswer);
+  ch.bind("client-screen-ice",handleScreenIce);
+  ch.bind("client-screen-stop",d=>{if(d.from!==id&&!isScreenSender){if(screenPc)screenPc.close();screenPc=null;rv.srcObject=null;showMovie();$("source").style.display="grid";status("Screen sharing stopped")}});
+ }catch(e){alert("Pusher connection failed: "+e.message)}
+}
+$("create").onclick=()=>{name=$("name").value.trim();if(!name)return alert("Enter your name");room="room-"+Math.random().toString(36).slice(2,8);enter()};
+$("join").onclick=()=>{name=$("name").value.trim();room=$("code").value.trim();if(!name||!room)return alert("Enter name and room");enter()};
+$("library").onclick=async()=>{
+ if(!MEDIA_SERVER)return alert("Set MEDIA_SERVER in this browser first, using your secure PC media-server URL.");
+ try{let d=await(await fetch(MEDIA_SERVER+"/library")).json();let panel=$("libraryPanel");panel.classList.remove("hidden");panel.innerHTML="";if(!d.items?.length){panel.textContent="No supported media files found.";return}d.items.forEach((x,i)=>{let b=document.createElement("button");b.className="btn movie";b.textContent=x.name;b.onclick=()=>{let u=MEDIA_SERVER+x.url;v.src=u;$("source").style.display="none";showMovie();send("url",{url:u})};panel.appendChild(b)})}catch(e){alert("Cannot reach PC media server: "+e.message)}
+};
+$("screenStart").onclick=()=>startScreenShare(true);$("stopScreen").onclick=stopScreenShare;
+$("play").onclick=()=>v.paused?v.play():v.pause();
+v.onplay=()=>{if(!remote)send("play",{t:v.currentTime});$("play").textContent="❚❚"};
+v.onpause=()=>{if(!remote)send("pause",{t:v.currentTime});$("play").textContent="▶"};
+$("seek").onchange=()=>{v.currentTime=+$('seek').value/1000*v.duration;send("seek",{t:v.currentTime});};
+v.ontimeupdate=()=>{$("seek").value=v.duration?v.currentTime/v.duration*1000:0;$('time').textContent=tm(v.currentTime)+" / "+tm(v.duration)};
+setInterval(()=>{if(!v.paused&&!remote)send("beat",{t:v.currentTime})},3000);
+$("share").onclick=async()=>{let u=location.href.split("?")[0]+"?room="+room;if(navigator.share)await navigator.share({title:"Together Watch Party",url:u});else{await navigator.clipboard?.writeText(u);status("Room link copied")}};
+$("full").onclick=()=>document.documentElement.requestFullscreen?.();
+const q=new URLSearchParams(location.search).get("room");if(q)$("code").value=q;
+})();
+</script></body></html>
